@@ -1,0 +1,5 @@
+bin/
+obj/
+fsharp-cuda.v11.suo
+*.cubin
+*.ptx
