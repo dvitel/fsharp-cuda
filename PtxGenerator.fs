@@ -10,8 +10,10 @@ open Microsoft.FSharp.Quotations.DerivedPatterns
 open Microsoft.FSharp.Quotations.ExprShape
 open Microsoft.FSharp.Linq.QuotationEvaluation
 
+//Ptx
 type PtxAttribute = ReflectedDefinitionAttribute
 
+//testing Ptx attribute
 module kernels = 
     [<Ptx>]
     let test1(a:int[], b:int[], c:int[]) = 
@@ -24,17 +26,20 @@ module kernels =
     let test3() = 0
         //Array2D.in
 
+//get reflected definition from MethodInfo
 let getPtxFromMethod acc (func: MethodInfo) = 
     match Expr.TryGetReflectedDefinition(func) with
     | Some expr -> (func, expr)::acc
     | None -> acc
     
+//get reflected definitions from Type
 let getPtxFromType acc (t: Type) = 
     t.GetMethods(BindingFlags.Public ||| BindingFlags.Static) |> Array.fold(fun acc func ->
         if (func.GetCustomAttributes(typeof<PtxAttribute>) |> Seq.length) > 0 then
             getPtxFromMethod acc func
         else acc) acc  
 
+//get reflected definitions from Assembly
 let getPtxFromAssembly acc (assembly: Assembly) =        
     assembly.GetTypes() |> Array.fold(fun acc t ->
         if (t.GetCustomAttributes(typeof<PtxAttribute>) |> Seq.length) > 0 then
@@ -43,11 +48,12 @@ let getPtxFromAssembly acc (assembly: Assembly) =
         else getPtxFromType acc t
         ) acc
 
+//get reflected definitions from current Assembly
 let getPtxForCurrentAssembly() = 
     getPtxFromAssembly [] (Assembly.GetExecutingAssembly())
 
 // compilation to ptx
-type PtxTypeSize = _8 = 8 | _16 = 16 | _32 = 32 | _64 = 64
+type PtxTypeSize = _8 = 8 | _16 = 16 | _32 = 32 | _64 = 64 //sizes in bits
 type PtxType = 
     | S of PtxTypeSize //int
     | U of PtxTypeSize //uint
@@ -135,7 +141,7 @@ type Param = {
     props: Map<string, Param>
 }
 with
-    member x.RegisterPtxType = 
+    member x.PtxTypeForRegister = 
         match x.pointerTo with
         | Some _ -> PtxType.U PtxTypeSize._32
         | None -> x.ptxType
@@ -154,7 +160,7 @@ type PtxSignature() =
                 let arrayRank = v.Type.GetArrayRank()
                 if arrayRank = 1 then
                     let lengthName = sprintf "%sLength" v.Name
-                    let length = 
+                    let length = //length property
                         {ptxType = PtxType.U PtxTypeSize._32; 
                          pointerTo = None; name = lengthName; 
                          index = parameters.Count; variable = v;
@@ -162,7 +168,7 @@ type PtxSignature() =
                     parameters <- Map.add lengthName length parameters
                     Some Global, v.Type.GetElementType().ToPtxType(), Map [ "Length", length ]
                 else 
-                    let lengths = 
+                    let lengths = //lengths properties
                         Map [for i in 1..arrayRank do
                                 let lengthName = sprintf "%sLength%d" v.Name i; 
                                 let lengthProp = 
@@ -239,7 +245,7 @@ type PtxDeclarations(intent) =
         let label = sprintf "L_%d" labelsCount
         labelsCount <- labelsCount + 1
         label
-    member x.NewBinded(v:Var) = 
+    member x.NewBinded(v:Var) = //TODO - add binded to binding spaces
         match Map.tryFind v.Name bindedRegisters with
         | Some reg -> reg
         | None ->
@@ -264,7 +270,7 @@ type PtxDeclarations(intent) =
         match Map.tryFind param.name bindedRegisters with
         | Some reg -> reg
         | None ->
-            let ptxType = param.RegisterPtxType
+            let ptxType = param.PtxTypeForRegister
             let props = param.props |> Map.map(fun _ param -> x.NewBinded(param))
             match Map.tryFind ptxType bindedRegistersCount with
             | Some ([], allocCount) -> 
@@ -286,47 +292,28 @@ type PtxDeclarations(intent) =
         bindingSpaces <- Set.empty::bindingSpaces
     member x.Unbind(v:Var) = 
         let ptxType = v.Type.ToPtxType()
+        let unbind(reg: Register) = 
+            bindedRegisters <- Map.remove v.Name bindedRegisters
+            match Map.tryFind reg.ptxType bindedRegistersCount with
+            | None -> ()
+            | Some (free, allocated) -> 
+                bindedRegistersCount <- Map.add ptxType (reg.index::free, allocated) bindedRegistersCount
         match bindingSpaces with
-        | [] -> 
-            match Map.tryFind v.Name bindedRegisters with
-            | None -> ()
-            | Some reg ->
-                bindedRegisters <- Map.remove v.Name bindedRegisters
-                match Map.tryFind reg.ptxType bindedRegistersCount with
-                | None -> ()
-                | Some (free, allocated) -> 
-                    bindedRegistersCount <- Map.add ptxType (reg.index::free, allocated) bindedRegistersCount
-        | space::_ ->
-            if not(space.Contains(ptxType, v.Name)) then
-                match Map.tryFind v.Name bindedRegisters with
-                | None -> ()
-                | Some reg ->
-                    bindedRegisters <- Map.remove v.Name bindedRegisters
-                    match Map.tryFind reg.ptxType bindedRegistersCount with
-                    | None -> ()
-                    | Some (free, allocated) -> 
-                        bindedRegistersCount <- Map.add ptxType (reg.index::free, allocated) bindedRegistersCount
+        | space::_ when space.Contains(ptxType, v.Name) -> ()
+        | _ -> Map.tryFind v.Name bindedRegisters |> Option.iter unbind
     member x.Unbind(reg:Register) =         
-        match bindingSpaces, reg.variable with
-        | [], Some name -> 
-            match Map.tryFind name bindedRegisters with
-            | None -> ()
-            | Some reg ->
+        let unbind name = 
+            Map.tryFind name bindedRegisters
+            |> Option.iter(fun reg ->
                 bindedRegisters <- Map.remove name bindedRegisters
                 match Map.tryFind reg.ptxType bindedRegistersCount with
                 | None -> ()
                 | Some (free, allocated) -> 
-                    bindedRegistersCount <- Map.add reg.ptxType (reg.index::free, allocated) bindedRegistersCount
-        | space::_, Some name ->
-            if space.Contains(reg.ptxType, reg.Name) |> not then
-                match Map.tryFind name bindedRegisters with
-                | None -> ()
-                | Some reg ->
-                    bindedRegisters <- Map.remove name bindedRegisters
-                    match Map.tryFind reg.ptxType bindedRegistersCount with
-                    | None -> ()
-                    | Some (free, allocated) -> 
-                        bindedRegistersCount <- Map.add reg.ptxType (reg.index::free, allocated) bindedRegistersCount
+                    bindedRegistersCount <- Map.add reg.ptxType (reg.index::free, allocated) bindedRegistersCount)
+        match bindingSpaces, reg.variable with
+        | [], Some name -> unbind name
+        | space::_, Some name when space.Contains(reg.ptxType, reg.Name) |> not ->
+            unbind name
         | _, _ -> ()     
     member x.UnbindSpace() = 
         match bindingSpaces with
@@ -347,11 +334,10 @@ type PtxDeclarations(intent) =
             match Map.tryFind reg.ptxType registers with
             | None -> ()
             | Some regs ->
-                match Map.tryFind reg.index regs.busy with
-                | None -> () //maybe binded
-                | _ ->
-                    registers <- Map.add reg.ptxType {regs with free=reg::regs.free; busy=Map.remove reg.index regs.busy} registers)
-    member x.FreeAndAloc(ptxType, [<ParamArray>] regs: Register[]) = 
+                Map.tryFind reg.index regs.busy
+                |> Option.iter(fun _ ->
+                    registers <- Map.add reg.ptxType {regs with free=reg::regs.free; busy=Map.remove reg.index regs.busy} registers))
+    member x.FreeAndAlloc(ptxType, [<ParamArray>] regs: Register[]) = 
         x.Free(regs)
         x.NewReg(ptxType)
     override x.ToString() = 
@@ -433,21 +419,21 @@ let rec compile (expr: Expr) =
         let operandWithOperand (opStr, modifier) expr1 expr2 = 
             match compileBody expr1, compileBody expr2 with
             | Choice1Of3 reg1, Choice1Of3 reg2 ->
-                let resReg = declarations.FreeAndAloc(reg1.ptxType, reg1, reg2)
+                let resReg = declarations.FreeAndAlloc(reg1.ptxType, reg1, reg2)
                 sprintf 
                     "%s%s%s %s, %s, %s;" 
                     opStr modifier (resReg.ptxType.ToString()) resReg.Name reg1.Name reg2.Name
                 |> instructions.New
                 Choice1Of3 resReg
             | Choice1Of3 reg1, Choice2Of3 (v, t) ->
-                let resReg = declarations.FreeAndAloc(reg1.ptxType, reg1)
+                let resReg = declarations.FreeAndAlloc(reg1.ptxType, reg1)
                 sprintf 
                     "%s%s%s %s, %s, %A;" 
                     opStr modifier (resReg.ptxType.ToString()) resReg.Name reg1.Name v
                 |> instructions.New
                 Choice1Of3 resReg
             | Choice2Of3 (v, t), Choice1Of3 reg1 ->
-                let resReg = declarations.FreeAndAloc(reg1.ptxType, reg1)
+                let resReg = declarations.FreeAndAlloc(reg1.ptxType, reg1)
                 sprintf 
                     "%s%s%s %s, %A, %s;" 
                     opStr modifier (resReg.ptxType.ToString()) resReg.Name v reg1.Name
@@ -460,21 +446,21 @@ let rec compile (expr: Expr) =
         let logicalOp (opStr, modifier) expr1 expr2 = 
             match compileBody expr1, compileBody expr2 with
             | Choice1Of3 reg1, Choice1Of3 reg2 ->                
-                let predReg = declarations.FreeAndAloc(PtxType.Pred, reg1, reg2)
+                let predReg = declarations.FreeAndAlloc(PtxType.Pred, reg1, reg2)
                 sprintf 
                     "setp.%s%s%s %s, %s, %s;" 
                     opStr modifier (reg1.ptxType.ToString()) predReg.Name reg1.Name reg2.Name
                 |> instructions.New
                 Choice1Of3 predReg
             | Choice1Of3 reg1, Choice2Of3 (v, t) ->
-                let predReg = declarations.FreeAndAloc(PtxType.Pred, reg1)
+                let predReg = declarations.FreeAndAlloc(PtxType.Pred, reg1)
                 sprintf 
                     "setp.%s%s%s %s, %s, %A;" 
                     opStr modifier (reg1.ptxType.ToString()) predReg.Name reg1.Name v
                 |> instructions.New
                 Choice1Of3 predReg
             | Choice2Of3 (v, t), Choice1Of3 reg1 ->
-                let predReg = declarations.FreeAndAloc(PtxType.Pred, reg1)
+                let predReg = declarations.FreeAndAlloc(PtxType.Pred, reg1)
                 sprintf 
                     "setp.%s%s%s %s, %A, %s;" 
                     opStr modifier (reg1.ptxType.ToString()) predReg.Name v reg1.Name
@@ -529,43 +515,43 @@ let rec compile (expr: Expr) =
         | SpecificCall <@@ (+) @@> (_, _, [SpecificCall <@@ (*) @@> (_, _, [aExpr; bExpr]); cExpr]) -> 
             match compileBody aExpr, compileBody bExpr, compileBody cExpr with
             | Choice1Of3 aReg, Choice1Of3 bReg, Choice1Of3 cReg ->
-                let resReg = declarations.FreeAndAloc(aReg.ptxType, aReg, bReg, cReg)
+                let resReg = declarations.FreeAndAlloc(aReg.ptxType, aReg, bReg, cReg)
                 sprintf "mad.lo%s %s, %s, %s, %s;"
                     (resReg.ptxType.ToString()) resReg.Name aReg.Name bReg.Name cReg.Name
                 |> instructions.New
                 Choice1Of3 resReg
             | Choice1Of3 aReg, Choice1Of3 bReg, Choice2Of3(v, t) ->
-                let resReg = declarations.FreeAndAloc(aReg.ptxType, aReg, bReg)
+                let resReg = declarations.FreeAndAlloc(aReg.ptxType, aReg, bReg)
                 sprintf "mad.lo%s %s, %s, %s, %A;"
                     (resReg.ptxType.ToString()) resReg.Name aReg.Name bReg.Name v
                 |> instructions.New
                 Choice1Of3 resReg  
             | Choice1Of3 aReg,  Choice2Of3(v, t), Choice1Of3 cReg ->
-                let resReg = declarations.FreeAndAloc(aReg.ptxType, aReg, cReg)
+                let resReg = declarations.FreeAndAlloc(aReg.ptxType, aReg, cReg)
                 sprintf "mad.lo%s %s, %s, %A, %s;"
                     (resReg.ptxType.ToString()) resReg.Name aReg.Name v cReg.Name
                 |> instructions.New
                 Choice1Of3 resReg        
             | Choice2Of3(v, t), Choice1Of3 bReg, Choice1Of3 cReg ->
-                let resReg = declarations.FreeAndAloc(bReg.ptxType, bReg, cReg)
+                let resReg = declarations.FreeAndAlloc(bReg.ptxType, bReg, cReg)
                 sprintf "mad.lo%s %s, %A, %s, %s;"
                     (resReg.ptxType.ToString()) resReg.Name v bReg.Name cReg.Name
                 |> instructions.New
                 Choice1Of3 resReg 
             | Choice2Of3(v1, t1), Choice1Of3 bReg, Choice2Of3 (v2, t2) ->
-                let resReg = declarations.FreeAndAloc(bReg.ptxType, bReg)
+                let resReg = declarations.FreeAndAlloc(bReg.ptxType, bReg)
                 sprintf "mad.lo%s %s, %A, %s, %A;"
                     (resReg.ptxType.ToString()) resReg.Name v1 bReg.Name v2
                 |> instructions.New
                 Choice1Of3 resReg 
             | Choice1Of3 aReg, Choice2Of3(v1, t1), Choice2Of3 (v2, t2) ->
-                let resReg = declarations.FreeAndAloc(aReg.ptxType, aReg)
+                let resReg = declarations.FreeAndAlloc(aReg.ptxType, aReg)
                 sprintf "mad.lo%s %s, %s, %A, %A;"
                     (resReg.ptxType.ToString()) resReg.Name aReg.Name v1 v2
                 |> instructions.New
                 Choice1Of3 resReg
             | Choice2Of3(v1, t1), Choice2Of3(v2, t2), Choice1Of3 cReg ->
-                let resReg = declarations.FreeAndAloc(cReg.ptxType, cReg)
+                let resReg = declarations.FreeAndAlloc(cReg.ptxType, cReg)
                 let v, _ = instructions.Eval("mul", (v1, t1), (v2, t2))
                 sprintf "add.lo%s %s, %A, %s;"
                     (resReg.ptxType.ToString()) resReg.Name v cReg.Name
@@ -704,7 +690,7 @@ let rec compile (expr: Expr) =
                 let returnRegOpt = 
                     match ifReg with
                     | Choice1Of3 reg -> 
-                        let outReg = declarations.FreeAndAloc(reg.ptxType, reg)
+                        let outReg = declarations.FreeAndAlloc(reg.ptxType, reg)
                         sprintf "mov%s %s, %s;" (outReg.ptxType.ToString()) outReg.Name reg.Name |> instructions.New
                         Some outReg
                     | Choice2Of3(v, t) ->
@@ -750,7 +736,7 @@ let rec compile (expr: Expr) =
             | Choice3Of3 (), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
                 failwith "Null value is bad for index"
             | Choice1Of3 indexReg, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
-                let newIndexReg = declarations.FreeAndAloc(indexReg.ptxType, indexReg)
+                let newIndexReg = declarations.FreeAndAlloc(indexReg.ptxType, indexReg)
                 sprintf "mad.lo%s %s, %s, %d, %s;"
                     (newIndexReg.ptxType.ToString()) newIndexReg.Name indexReg.Name param.ptxType.ByteSize reg.Name
                 |> instructions.New
@@ -791,7 +777,7 @@ let rec compile (expr: Expr) =
             | Choice2Of3(v1, _), Choice2Of3 (v2, _), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
                 failwithf "Values %A, %A are bad for index" v1 v2
             | Choice2Of3 (:? int as index1, _), Choice1Of3 indexReg2, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
-                let newIndexReg = declarations.FreeAndAloc(indexReg2.ptxType, indexReg2)
+                let newIndexReg = declarations.FreeAndAlloc(indexReg2.ptxType, indexReg2)
                 let length2Reg = reg.props.["Length2"] 
                 sprintf "mad.lo%s %s, %s, %d, %s;"
                     (newIndexReg.ptxType.ToString()) newIndexReg.Name length2Reg.Name index1 indexReg2.Name
@@ -806,7 +792,7 @@ let rec compile (expr: Expr) =
                 declarations.Free(newIndexReg)
                 Choice1Of3 valueReg
             | Choice1Of3 indexReg1, Choice1Of3 indexReg2, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
-                let newIndexReg = declarations.FreeAndAloc(indexReg2.ptxType, indexReg2, indexReg1)
+                let newIndexReg = declarations.FreeAndAlloc(indexReg2.ptxType, indexReg2, indexReg1)
                 let length2Reg = reg.props.["Length2"] 
                 sprintf "mad.lo%s %s, %s, %s, %s;"
                     (newIndexReg.ptxType.ToString()) newIndexReg.Name length2Reg.Name indexReg1.Name indexReg2.Name
@@ -821,7 +807,7 @@ let rec compile (expr: Expr) =
                 declarations.Free(newIndexReg)
                 Choice1Of3 valueReg
             | Choice1Of3 indexReg1, Choice2Of3 (:? int as index2, _), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
-                let newIndexReg = declarations.FreeAndAloc(indexReg1.ptxType, indexReg1)
+                let newIndexReg = declarations.FreeAndAlloc(indexReg1.ptxType, indexReg1)
                 let length2Reg = reg.props.["Length2"] 
                 sprintf "mad.lo%s %s, %s, %s, %d;"
                     (newIndexReg.ptxType.ToString()) newIndexReg.Name length2Reg.Name indexReg1.Name index2
@@ -866,7 +852,7 @@ let rec compile (expr: Expr) =
             | _, Choice3Of3 (), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
                 failwith "Null value is bad for index"
             | Choice2Of3 (v, t), Choice1Of3 indexReg, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
-                let newIndexReg = declarations.FreeAndAloc(indexReg.ptxType, indexReg)
+                let newIndexReg = declarations.FreeAndAlloc(indexReg.ptxType, indexReg)
                 sprintf "mad.lo%s %s, %s, %d, %s;"
                     (newIndexReg.ptxType.ToString()) newIndexReg.Name indexReg.Name param.ptxType.ByteSize reg.Name
                 |> instructions.New
@@ -876,7 +862,7 @@ let rec compile (expr: Expr) =
                 declarations.Free(newIndexReg)
                 Choice3Of3()
             | Choice1Of3 resReg, Choice1Of3 indexReg, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
-                let newIndexReg = declarations.FreeAndAloc(indexReg.ptxType, indexReg)
+                let newIndexReg = declarations.FreeAndAlloc(indexReg.ptxType, indexReg)
                 sprintf "mad.lo%s %s, %s, %d, %s;"
                     (newIndexReg.ptxType.ToString()) newIndexReg.Name indexReg.Name param.ptxType.ByteSize reg.Name
                 |> instructions.New
@@ -934,37 +920,102 @@ let rec compile (expr: Expr) =
                         (memoryType.ToString()) (param.ptxType.ToString()) indexReg.Name resReg.Name              
                 |> instructions.New
                 Choice3Of3()
-            | Choice3Of3 (), _, _, _ -> Choice3Of3()
-            | _, _, Choice2Of3 (v, _), _ | _, Choice2Of3 (v, _), _, _-> 
-                failwithf "Value %A is bad for index" v
-            | _, Choice3Of3 (), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg), _ -> //TODO last match
+            | _, Choice3Of3 (), _, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) ->
                 failwith "Null value is bad for index"
-            | Choice2Of3 (v, t), Choice1Of3 indexReg, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg), _ -> 
-                let newIndexReg = declarations.FreeAndAloc(indexReg.ptxType, indexReg)
+            | _, _, Choice3Of3 (), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) ->
+                failwith "Null value is bad for index"
+            | Choice2Of3 (v, t), Choice1Of3 indexReg1, Choice1Of3 indexReg2, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
+                let newIndexReg1 = declarations.FreeAndAlloc(indexReg1.ptxType, indexReg1)
+                sprintf "mad.lo%s %s, %s, %s, %s;" //TODO - ptx type conversion
+                    (newIndexReg1.ptxType.ToString()) newIndexReg1.Name indexReg1.Name reg.props.["Length1"].Name indexReg2.Name//TODO: check
+                |> instructions.New
+                let newIndexReg2 = declarations.FreeAndAlloc(indexReg2.ptxType, indexReg2)
                 sprintf "mad.lo%s %s, %s, %d, %s;"
-                    (newIndexReg.ptxType.ToString()) newIndexReg.Name indexReg.Name param.ptxType.ByteSize reg.Name
+                    (newIndexReg2.ptxType.ToString()) newIndexReg2.Name newIndexReg1.Name param.ptxType.ByteSize reg.Name
                 |> instructions.New
                 sprintf "st%s%s [%s], %A;" 
-                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg.Name v
+                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg2.Name v
                 |> instructions.New
-                declarations.Free(newIndexReg)
+                declarations.Free(newIndexReg1, newIndexReg2)
                 Choice3Of3()
-            | Choice1Of3 resReg, Choice1Of3 indexReg, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg), _ -> //TODO last match
-                let newIndexReg = declarations.FreeAndAloc(indexReg.ptxType, indexReg)
+            | Choice2Of3 (v, t), Choice1Of3 indexReg1, Choice2Of3(:? int as index2, _), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
+                let newIndexReg1 = declarations.FreeAndAlloc(indexReg1.ptxType, indexReg1)
+                sprintf "mad.lo%s %s, %s, %s, %d;" //TODO - ptx type conversion
+                    (newIndexReg1.ptxType.ToString()) newIndexReg1.Name indexReg1.Name reg.props.["Length1"].Name index2//TODO: check
+                |> instructions.New
+                let newIndexReg2 = declarations.NewReg(indexReg1.ptxType)
                 sprintf "mad.lo%s %s, %s, %d, %s;"
-                    (newIndexReg.ptxType.ToString()) newIndexReg.Name indexReg.Name param.ptxType.ByteSize reg.Name
+                    (newIndexReg2.ptxType.ToString()) newIndexReg2.Name newIndexReg1.Name param.ptxType.ByteSize reg.Name
+                |> instructions.New
+                sprintf "st%s%s [%s], %A;" 
+                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg2.Name v
+                |> instructions.New
+                declarations.Free(newIndexReg1, newIndexReg2)
+                Choice3Of3()
+            | Choice2Of3 (v, t), Choice2Of3(:? int as index1, _), Choice1Of3 indexReg2, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> 
+                let newIndexReg1 = declarations.NewReg(indexReg2.ptxType)
+                sprintf "mad.lo%s %s, %d, %s, %s;" //TODO - ptx type conversion
+                    (newIndexReg1.ptxType.ToString()) newIndexReg1.Name index1 reg.props.["Length1"].Name indexReg2.Name//TODO: check
+                |> instructions.New
+                let newIndexReg2 = declarations.FreeAndAlloc(indexReg2.ptxType, indexReg2)
+                sprintf "mad.lo%s %s, %s, %d, %s;"
+                    (newIndexReg2.ptxType.ToString()) newIndexReg2.Name newIndexReg1.Name param.ptxType.ByteSize reg.Name
+                |> instructions.New
+                sprintf "st%s%s [%s], %A;" 
+                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg2.Name v
+                |> instructions.New
+                declarations.Free(newIndexReg1, newIndexReg2)
+                Choice3Of3()
+            | Choice1Of3 resReg, Choice1Of3 indexReg1, Choice1Of3 indexReg2, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> //TODO last match
+                let newIndexReg1 = declarations.FreeAndAlloc(indexReg1.ptxType, indexReg1)
+                sprintf "mad.lo%s %s, %s, %s, %s;" //TODO - ptx type conversion
+                    (newIndexReg1.ptxType.ToString()) newIndexReg1.Name indexReg1.Name reg.props.["Length1"].Name indexReg2.Name//TODO: check
+                |> instructions.New
+                let newIndexReg2 = declarations.FreeAndAlloc(indexReg2.ptxType, indexReg2)
+                sprintf "mad.lo%s %s, %s, %d, %s;"
+                    (newIndexReg2.ptxType.ToString()) newIndexReg2.Name newIndexReg1.Name param.ptxType.ByteSize reg.Name
                 |> instructions.New
                 sprintf "st%s%s [%s], %s;" 
-                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg.Name resReg.Name
+                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg2.Name resReg.Name
                 |> instructions.New
-                declarations.Free(newIndexReg, resReg)
+                declarations.Free(newIndexReg1, newIndexReg2, resReg)
                 Choice3Of3()
-            | Choice3Of3 (), Choice1Of3 indexReg, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg), _ -> //TODO last match
-                declarations.Free(indexReg)                
+            | Choice1Of3 resReg, Choice2Of3(:? int as index1, _), Choice1Of3 indexReg2, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> //TODO last match
+                let newIndexReg1 = declarations.NewReg(indexReg2.ptxType)
+                sprintf "mad.lo%s %s, %d, %s, %s;" //TODO - ptx type conversion
+                    (newIndexReg1.ptxType.ToString()) newIndexReg1.Name index1 reg.props.["Length1"].Name indexReg2.Name//TODO: check
+                |> instructions.New
+                let newIndexReg2 = declarations.FreeAndAlloc(indexReg2.ptxType, indexReg2)
+                sprintf "mad.lo%s %s, %s, %d, %s;"
+                    (newIndexReg2.ptxType.ToString()) newIndexReg2.Name newIndexReg1.Name param.ptxType.ByteSize reg.Name
+                |> instructions.New
+                sprintf "st%s%s [%s], %s;" 
+                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg2.Name resReg.Name
+                |> instructions.New
+                declarations.Free(newIndexReg1, newIndexReg2, resReg)
                 Choice3Of3()
-            | _, _, Choice1Of3 reg, _ -> failwithf "Register does not binded to parameter %A" reg //TODO last match
-            | _, _, Choice2Of3 (v, _), _ -> failwithf "Array variable %A is unsupported" v //TODO last match
-            | _, _, Choice3Of3 (), _ -> failwith "Array var could not be detected"                 //TODO last match
+            | Choice1Of3 resReg, Choice1Of3 indexReg1, Choice2Of3(:? int as index2, _), Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> //TODO last match
+                let newIndexReg1 = declarations.FreeAndAlloc(indexReg1.ptxType, indexReg1)
+                sprintf "mad.lo%s %s, %s, %s, %d;" //TODO - ptx type conversion
+                    (newIndexReg1.ptxType.ToString()) newIndexReg1.Name indexReg1.Name reg.props.["Length1"].Name index2//TODO: check
+                |> instructions.New
+                let newIndexReg2 = declarations.NewReg(indexReg1.ptxType)
+                sprintf "mad.lo%s %s, %s, %d, %s;"
+                    (newIndexReg2.ptxType.ToString()) newIndexReg2.Name newIndexReg1.Name param.ptxType.ByteSize reg.Name
+                |> instructions.New
+                sprintf "st%s%s [%s], %s;" 
+                    (memoryType.ToString()) (param.ptxType.ToString()) newIndexReg2.Name resReg.Name
+                |> instructions.New
+                declarations.Free(newIndexReg1, newIndexReg2, resReg)
+                Choice3Of3()
+            | Choice3Of3 (), Choice1Of3 indexReg1, Choice1Of3 indexReg2, Choice1Of3 ({parameter = Some ({pointerTo = Some memoryType} as param)} as reg) -> //TODO last match
+                declarations.Free(indexReg1, indexReg2)                
+                Choice3Of3()
+            | _, _, Choice2Of3 (v, _), _ | _, Choice2Of3 (v, _), _, _-> 
+                failwithf "Value %A is bad for index" v
+            | _, _, _, Choice1Of3 reg -> failwithf "Register does not binded to parameter %A" reg //TODO last match
+            | _, _, _, Choice2Of3 (v, _) -> failwithf "Array variable %A is unsupported" v //TODO last match
+            | _, _, _, Choice3Of3 () -> failwith "Array var could not be detected"                 //TODO last match
         | PropertyGet(Some varExpr, propInfo, []) ->
             match compileBody varExpr with
             | Choice1Of3 reg when reg.props.ContainsKey(propInfo.Name) -> 
